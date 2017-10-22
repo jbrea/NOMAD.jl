@@ -62,6 +62,7 @@ function Evaluator(func, constraints, ndims)
 	eval(Cxx.process_cxx_string(cxxstring))
 	Evaluator(ndims, cppclassname, cbfunc, Function[])
 end
+export Evaluator
 
 struct Opt
 	evaluator::Evaluator
@@ -71,7 +72,7 @@ function Opt(ev; kargs...)
 	paramstring = parameterstring(ev.ndims, kargs)
 	CXXID.main += 1
 	funcname = Symbol(:main_, CXXID.main)
-	cxxstring = """int $funcname() {
+	cxxstring = """int $funcname(double* feasible, double* res, int* bbevals) {
 		NOMAD::Display out ( std::cout );
         out.precision ( NOMAD::DISPLAY_PRECISION_STD );
         try {
@@ -83,6 +84,14 @@ function Opt(ev; kargs...)
 			$(ev.cppclassname) ev (p);
 			NOMAD::Mads mads (p, &ev);
 			mads.run();
+
+			const NOMAD::Eval_Point* bf = mads.get_best_feasible();
+			res[0] = bf->get_f().value();
+			for ( int i = 0; i < $(ev.ndims); i++) {
+				feasible[i] = bf->value(i);
+			}
+			NOMAD::Stats & stats = mads.get_stats();
+			bbevals[0] = stats.get_bb_eval();
 		}
 		catch ( exception & e ) {
            cerr << "\\nNOMAD has been interrupted (" << e.what() << ")\\n\\n\";
@@ -94,9 +103,21 @@ function Opt(ev; kargs...)
 	"""
 # 	println(cxxstring)
 	eval(Cxx.process_cxx_string(cxxstring))
-	cppfunc() = @cxx $funcname()
+	cppfunc(feasible, res, bbevals) = @cxx $funcname(pointer(feasible), 
+												     pointer(res),
+													 pointer(bbevals))
 	Opt(ev, cppfunc)
 end
+export Opt
+
+function optimize!(opt)
+	feasible = zeros(opt.evaluator.ndims)
+	res = [0.]
+	bbevals = Int32[0]
+	opt.cppfunc(feasible, res, bbevals)
+	feasible, res[1], bbevals[1]
+end
+export optimize!
 
 function preprocessarg(ndims, key, arg)
 	if key == :UPPER_BOUND || key == :LOWER_BOUND || key == :X0
@@ -120,7 +141,8 @@ end
 
 function help(key = "")
 	bindir = joinpath(nomaddir, "bin", "nomad")
-	s = readstring(`$bindir --help $key`)
+	s = "This help message is obtained by calling `nomad --help` (in batch mode).\nNot all features are available in julia.\nPlease open an issue on github, if something doesn't work as expected.\n\n"
+	s *= readstring(`$bindir --help $key`)
 	print(replace(s, "\$NOMAD_HOME", normpath(nomaddir)))
 end
 
