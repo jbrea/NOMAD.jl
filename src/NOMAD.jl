@@ -118,6 +118,11 @@ function parameterstring(ndims, kargs)
 	s
 end
 
+function help(key = "")
+	bindir = joinpath(nomaddir, "bin", "nomad")
+	s = readstring(`$bindir --help $key`)
+	print(replace(s, "\$NOMAD_HOME", normpath(nomaddir)))
+end
 
 
 struct NOMADSolver <: SolverInterface.AbstractMathProgSolver
