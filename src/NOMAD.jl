@@ -14,141 +14,159 @@ Libdl.dlopen(libnomad, Libdl.RTLD_GLOBAL)
 Libdl.dlopen(libsgtelib, Libdl.RTLD_GLOBAL)
 
 cxx"""
-	#include "nomad.hpp"
-	using namespace std;
+    #include "nomad.hpp"
+    using namespace std;
 """
 
 import MathProgBase.SolverInterface
 import MathProgBase.SolverInterface.optimize!
 
+function createcbfunc(id, func, ndims)
+    cbfuncstring = "function evalfunc_$id($(join(["_x$i" for i in 1:ndims], ", ")))\n"
+    for i in 1:ndims
+        cbfuncstring *= "$(Symbol(:x, i)) = unsafe_load($(Symbol(:_x, i)))\n"
+    end
+    cbfuncstring *= "Float64(Main.$(func)($(join(["x$i" for i in 1:ndims], ", "))))\nend"
+    cbfunc = eval(parse(cbfuncstring))
+end
+
 struct Evaluator
-	ndims::Int
-	cppclassname::String
-	callbackfunction::Function
-	callbackconstraints::Array{Function, 1}
+    ndims::Int
+    cppclassname::String
+    callbackfunction::Function
+    callbackconstraints::Array{Tuple{Symbol, Function}, 1}
 end
 mutable struct CxxID
-	ev::Int
-	main::Int
+    ev::Int
+    main::Int
 end
 const CXXID = CxxID(0, 0)
-function Evaluator(func, constraints, ndims)
-	CXXID.ev += 1
-	cbfuncstring = "function evalfunc_$(CXXID.ev)($(join(["_x$i" for i in 1:ndims], ", ")))\n"
-	for i in 1:ndims
-		cbfuncstring *= "$(Symbol(:x, i)) = unsafe_load($(Symbol(:_x, i)))\n"
-	end
- 	cbfuncstring *= "Float64(Main.$(func)($(join(["x$i" for i in 1:ndims], ", "))))\nend"
-# 	println(cbfuncstring)
-	cbfunc = eval(parse(cbfuncstring))
-	cppclassname = "NOMAD_Evaluator_$(CXXID.ev)"
-	cxxstring = """
-		class $cppclassname : public NOMAD::Evaluator {
-			public:
-				$cppclassname  ( const NOMAD::Parameters & p ) : NOMAD::Evaluator ( p ) {}
-		~$cppclassname ( void ) {}
-		bool eval_x ( NOMAD::Eval_Point   & x          ,
-					  const NOMAD::Double & h_max      ,
-					  bool                & count_eval  ) const
-			{
-			x.set_bb_output  ( 0 , \$($(cbfunc))($(join(["x[$i].value()" 
-													 for i in 0:ndims-1],
-													","))));
-			count_eval = true; 
-			return true;
-			}        
-		};"""
-#  	println(cxxstring)
-	eval(Cxx.process_cxx_string(cxxstring))
-	Evaluator(ndims, cppclassname, cbfunc, Function[])
+function Evaluator(func, constraints, ndims; printcxx = false)
+    CXXID.ev += 1
+    cppclassname = "NOMAD_Evaluator_$(CXXID.ev)"
+    objfunc = createcbfunc(CXXID.ev, func, ndims)
+    argstring = join(["x[$i].value()" for i in 0:ndims-1], ",")
+    constrfuncs = Tuple{Symbol, Function}[]
+    constrstring = ""
+    for (i, constr) in enumerate(constraints)
+        if typeof(constr) <: Function
+            constr = (:EB, constr)
+        end
+        push!(constrfuncs, (constr[1], 
+                            createcbfunc("$(CXXID.ev)_c$i", constr[2], ndims)))
+        constrstring *= "\n    x.set_bb_output  ( $i , \$($(constrfuncs[i][2]))($argstring));"
+    end
+    cxxstring = """
+        class $cppclassname : public NOMAD::Evaluator {
+            public:
+                $cppclassname  ( const NOMAD::Parameters & p ) : NOMAD::Evaluator ( p ) {}
+        ~$cppclassname ( void ) {}
+        bool eval_x ( NOMAD::Eval_Point   & x          ,
+                      const NOMAD::Double & h_max      ,
+                      bool                & count_eval  ) const
+            {
+            x.set_bb_output  ( 0 , \$($(objfunc))($argstring)); $constrstring;
+            count_eval = true; 
+            return true;
+            }        
+        };"""
+    if printcxx; println(cxxstring); end
+    eval(Cxx.process_cxx_string(cxxstring))
+    Evaluator(ndims, cppclassname, objfunc, constrfuncs)
 end
 export Evaluator
 
 struct Opt
-	evaluator::Evaluator
-	cppfunc::Function
+    evaluator::Evaluator
+    cppfunc::Function
 end
-function Opt(ev; kargs...)
-	paramstring = parameterstring(ev.ndims, kargs)
-	CXXID.main += 1
-	funcname = Symbol(:main_, CXXID.main)
-	cxxstring = """int $funcname(double* feasible, double* res, int* bbevals) {
-		NOMAD::Display out ( std::cout );
+function Opt(ev; printcxx = false, kargs...)
+    paramstring = parameterstring(ev.ndims, kargs)
+    CXXID.main += 1
+    funcname = Symbol(:main_, CXXID.main)
+    bboutdim = length(ev.callbackconstraints) + 1
+    bboutdefstring = "bbot[0] = NOMAD::OBJ;"
+    for (i, (typ, f)) in enumerate(ev.callbackconstraints)
+        bboutdefstring *= "\n        bbot[$i] = NOMAD::$typ;"
+    end
+    cxxstring = """int $funcname(double* bf_x, double* bf_f, 
+                                 NOMAD::Stats *stats) {
+        NOMAD::Display out ( std::cout );
         out.precision ( NOMAD::DISPLAY_PRECISION_STD );
         try {
-			NOMAD::Parameters p (out); 
-			p.set_DIMENSION ($(ev.ndims));
-			vector<NOMAD::bb_output_type> bbot (1);
-			bbot[0] = NOMAD::OBJ;
-			p.set_BB_OUTPUT_TYPE( bbot ); $paramstring; p.check();
-			$(ev.cppclassname) ev (p);
-			NOMAD::Mads mads (p, &ev);
-			mads.run();
+            NOMAD::Parameters p (out); 
+            p.set_DIMENSION ($(ev.ndims));
+            vector<NOMAD::bb_output_type> bbot ($bboutdim);
+            $bboutdefstring;
+            p.set_BB_OUTPUT_TYPE( bbot ); $paramstring; 
+            p.check();
+            $(ev.cppclassname) ev (p);
+            NOMAD::Mads mads (p, &ev);
+            mads.run();
 
-			const NOMAD::Eval_Point* bf = mads.get_best_feasible();
-			res[0] = bf->get_f().value();
-			for ( int i = 0; i < $(ev.ndims); i++) {
-				feasible[i] = bf->value(i);
-			}
-			NOMAD::Stats & stats = mads.get_stats();
-			bbevals[0] = stats.get_bb_eval();
-		}
-		catch ( exception & e ) {
+            const NOMAD::Eval_Point* bf = mads.get_best_feasible();
+            bf_f[0] = bf->get_f().value();
+            for ( int i = 0; i < $(ev.ndims); i++) {
+                bf_x[i] = bf->value(i);
+            }
+            *stats = mads.get_stats();
+        }
+        catch ( exception & e ) {
            cerr << "\\nNOMAD has been interrupted (" << e.what() << ")\\n\\n\";
         }
         NOMAD::Slave::stop_slaves ( out );
         NOMAD::end();
         return EXIT_SUCCESS;
        }
-	"""
-# 	println(cxxstring)
-	eval(Cxx.process_cxx_string(cxxstring))
-	cppfunc(feasible, res, bbevals) = @cxx $funcname(pointer(feasible), 
-												     pointer(res),
-													 pointer(bbevals))
-	Opt(ev, cppfunc)
+    """
+    if printcxx; println(cxxstring); end
+    eval(Cxx.process_cxx_string(cxxstring))
+    cppfunc(bf_x, bf_f, stats) = @cxx $funcname(pointer(bf_x), 
+                                                pointer(bf_f),
+                                                stats)
+    Opt(ev, cppfunc)
 end
 export Opt
 
 function optimize!(opt)
-	feasible = zeros(opt.evaluator.ndims)
-	res = [0.]
-	bbevals = Int32[0]
-	opt.cppfunc(feasible, res, bbevals)
-	feasible, res[1], bbevals[1]
+    bf_x = zeros(opt.evaluator.ndims)
+    bf_f = [0.]
+    stats = icxx"new NOMAD::Stats();"
+    opt.cppfunc(bf_x, bf_f, stats)
+    bf_x, bf_f[1], icxx"$stats->get_bb_eval();"
 end
 export optimize!
 
 function preprocessarg(ndims, key, arg)
-	if key == :UPPER_BOUND || key == :LOWER_BOUND || key == :X0
-		s = "NOMAD::Point point_$key ( $ndims );"
-		for i in 0:ndims - 1
-			s *= "point_$key[$i] = $(arg[i+1]);"
-		end
-		s *= "p.set_$key( point_$key );"
-		s
-	else
-		"p.set_$key( $arg );"
-	end
+    if key == :UPPER_BOUND || key == :LOWER_BOUND || key == :X0
+        s = "\n        NOMAD::Point point_$key ( $ndims );"
+        for i in 0:ndims - 1
+            s *= "\n        point_$key[$i] = $(arg[i+1]);"
+        end
+        s *= "\n        p.set_$key( point_$key );"
+        s
+    else
+        "\n        p.set_$key( $arg );"
+    end
 end
 function parameterstring(ndims, kargs)
-	s = ""
-	for (key, arg) in kargs
-		s *= preprocessarg(ndims, key, arg)
-	end
-	s
+    s = ""
+    for (key, arg) in kargs
+        s *= preprocessarg(ndims, key, arg)
+    end
+    s
 end
 
 function help(key = "")
-	bindir = joinpath(nomaddir, "bin", "nomad")
-	s = "This help message is obtained by calling `nomad --help` (in batch mode).\nNot all features are available in julia.\nPlease open an issue on github, if something doesn't work as expected.\n\n"
-	s *= readstring(`$bindir --help $key`)
-	print(replace(s, "\$NOMAD_HOME", normpath(nomaddir)))
+    bindir = joinpath(nomaddir, "bin", "nomad")
+    s = "This help message is obtained by calling `nomad --help` (in batch mode).\nNot all features are available in julia.\nPlease open an issue on github, if something doesn't work as expected.\n\n"
+    s *= readstring(`$bindir --help $key`)
+    print(replace(s, "\$NOMAD_HOME", normpath(nomaddir)))
 end
 
 
 struct NOMADSolver <: SolverInterface.AbstractMathProgSolver
-	
+    
 end
 
 mutable struct NOMADMathProgModel <: SolverInterface.AbstractNonlinearModel
