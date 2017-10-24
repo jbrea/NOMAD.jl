@@ -1,3 +1,9 @@
+#TODO: 
+# 1. implementation of constraints is a hack! eval_g called multiple times.
+# 2. return correct status
+# 3. is it possible to resume? 
+
+
 module NOMAD
 using Cxx, MathProgBase
 
@@ -21,13 +27,20 @@ cxx"""
 import MathProgBase.SolverInterface
 import MathProgBase.SolverInterface.optimize!
 
-function createcbfunc(id, func, ndims)
-    cbfuncstring = "function evalfunc_$id($(join(["_x$i" for i in 1:ndims], ", ")))\n"
-    for i in 1:ndims
-        cbfuncstring *= "$(Symbol(:x, i)) = unsafe_load($(Symbol(:_x, i)))\n"
+function createcbfunc(id, func, ndims, vectorin = true)
+    args = [Symbol(:x, i) for i in 1:ndims]
+    cbfuncex = quote
+        function $(Symbol(:evalfunc_, id))($([Symbol(:_x, i) for i in 1:ndims]...))
+            $([:($(Symbol(:x, i)) = unsafe_load($(Symbol(:_x, i))))
+               for i in 1:ndims]...)
+            if $vectorin
+                Float64($func([$(args...)]))
+            else
+                Float64($func($(args...)))
+            end
+        end
     end
-    cbfuncstring *= "Float64(Main.$(func)($(join(["x$i" for i in 1:ndims], ", "))))\nend"
-    cbfunc = eval(parse(cbfuncstring))
+    cbfunc = eval(cbfuncex)
 end
 
 struct Evaluator
@@ -41,10 +54,10 @@ mutable struct CxxID
     main::Int
 end
 const CXXID = CxxID(0, 0)
-function Evaluator(func, constraints, ndims; printcxx = false)
+function Evaluator(func, constraints, ndims; printcxx = false, vectorin = true)
     CXXID.ev += 1
     cppclassname = "NOMAD_Evaluator_$(CXXID.ev)"
-    objfunc = createcbfunc(CXXID.ev, func, ndims)
+    objfunc = createcbfunc(CXXID.ev, func, ndims, vectorin)
     argstring = join(["x[$i].value()" for i in 0:ndims-1], ",")
     constrfuncs = Tuple{Symbol, Function}[]
     constrstring = ""
@@ -53,7 +66,8 @@ function Evaluator(func, constraints, ndims; printcxx = false)
             constr = (:EB, constr)
         end
         push!(constrfuncs, (constr[1], 
-                            createcbfunc("$(CXXID.ev)_c$i", constr[2], ndims)))
+                            createcbfunc("$(CXXID.ev)_c$i", constr[2], ndims,
+                                         vectorin)))
         constrstring *= "\n    x.set_bb_output  ( $i , \$($(constrfuncs[i][2]))($argstring));"
     end
     cxxstring = """
@@ -128,14 +142,14 @@ function Opt(ev; printcxx = false, kargs...)
 end
 export Opt
 
-function optimize!(opt)
+function optimize(opt)
     bf_x = zeros(opt.evaluator.ndims)
     bf_f = [0.]
     stats = icxx"new NOMAD::Stats();"
     opt.cppfunc(bf_x, bf_f, stats)
     bf_x, bf_f[1], icxx"$stats->get_bb_eval();"
 end
-export optimize!
+export optimize
 
 function preprocessarg(ndims, key, arg)
     if key == :UPPER_BOUND || key == :LOWER_BOUND || key == :X0
@@ -166,11 +180,74 @@ end
 
 
 struct NOMADSolver <: SolverInterface.AbstractMathProgSolver
-    
+    params::Array{Tuple{Symbol, Any}, 1}
+end
+NOMADSolver() = NOMADSolver([(:DISPLAY_DEGREE, 0)])
+
+function SolverInterface.NonlinearModel(s::NOMADSolver)
+    NOMADMathProgModel(nothing, nothing, :Min, Float64[], 
+                       s.params, 0., :SUCCESS)
 end
 
 mutable struct NOMADMathProgModel <: SolverInterface.AbstractNonlinearModel
-
+    ev
+    opt
+    sense::Symbol
+    x::Array{Float64, 1}
+    params::Array{Tuple{Symbol, Any}, 1}
+    obj::Float64
+    status::Symbol
 end
+
+replaceinf(b) = map(x -> isinf(x) ? "$(sign(x) == 1 ? "" : "-")INFINITY" : x, b)
+
+function getboundfunc(b, i, sign, d, numVar)
+    constrval = Array{Float64}(numVar)
+    function g(x)
+        SolverInterface.eval_g(d, constrval, x)
+        sign * (b - constrval[i])
+    end
+end
+
+function MathProgBase.loadproblem!(m::NOMADMathProgModel, numVar, numConstr, 
+                                   l, u, lb, ub, sense,
+                                   d::SolverInterface.AbstractNLPEvaluator)
+    SolverInterface.initialize(d, Symbol[])
+    f(x) = sense == :Max ? -SolverInterface.eval_f(d, x) :
+                            SolverInterface.eval_f(d, x)
+    constraints = []
+    if numConstr > 0
+        for i in 1:numConstr
+            if !isinf(lb[i]); push!(constraints, getboundfunc(lb[i], i, 1, d, numVar)); end
+            if !isinf(ub[i]); push!(constraints, getboundfunc(ub[i], i, -1, d, numVar)); end
+        end
+    end
+    m.ev = Evaluator(f, constraints, numVar)
+    m.params = [m.params; (:UPPER_BOUND, replaceinf(u)); (:LOWER_BOUND, replaceinf(l))]
+end
+function SolverInterface.setwarmstart!(m::NOMADMathProgModel,x)
+    push!(m.params, (:X0, copy(float(x))))
+end
+
+function SolverInterface.optimize!(m::NOMADMathProgModel)
+    isa(m.ev, Evaluator) || error("Must load problem before solving")
+    m.opt = Opt(m.ev; m.params...)
+    m.x, m.obj, nbbcalls = optimize(m.opt)
+end
+
+function SolverInterface.status(m::NOMADMathProgModel)
+    if m.status == :SUCCESS || m.status == :FTOL_REACHED || m.status == :XTOL_REACHED
+        return :Optimal
+    elseif m.status == :ROUNDOFF_LIMITED
+        return :Suboptimal
+    elseif m.status in (:STOPVAL_REACHED,:MAXEVAL_REACHED,:MAXTIME_REACHED)
+        return :UserLimit
+    else
+        error("Unknown status $(m.status)")
+    end
+end
+
+SolverInterface.getsolution(m::NOMADMathProgModel) = m.x
+SolverInterface.getobjval(m::NOMADMathProgModel) = m.sense == :Max ? -m.obj : m.obj
 
 end # module
