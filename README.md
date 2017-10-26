@@ -31,17 +31,16 @@ optimize(opt)
 
 ```julia
 using NOMAD
-ev = Evaluator((x, y) -> - x^2 + (y - 1)^2, [(x, y) -> x - y], 2, vectorin = false)
+NOMAD.help(:CONSTRAINTS)
+ev = Evaluator((x, y) -> - x^2 + (y - 1)^2, [(:EB, (x, y) -> x - y)], 2, vectorin = false)
 opt = Opt(ev, UPPER_BOUND = [5, 6], LOWER_BOUND = [-2, -6], X0 = [1, 2])
 optimize(opt)
 ```
 
 ```julia
 using NOMAD
-ev = Evaluator(x -> x[5], [(:PB, x -> (norm(x-1)^2 - 25)), (:EB, x -> 25 - norm(x + 1)^2
-)], 5)
-opt = Opt(ev, UPPER_BOUND = [5, 6, 7, Inf64, Inf64], LOWER_BOUND = -6*ones(5), X0 = zero
-s(5), MAX_BB_EVAL = 100, SEED = -1)
+ev = Evaluator(x -> x[5], [(:PB, x -> (norm(x-1)^2 - 25)), (:EB, x -> 25 - norm(x + 1)^2)], 5)
+opt = Opt(ev, UPPER_BOUND = [5, 6, 7, Inf64, Inf64], LOWER_BOUND = -6*ones(5), X0 = zeros(5), MAX_BB_EVAL = 100, SEED = 11)
 optimize(opt)
 ```
 
