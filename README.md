@@ -19,13 +19,13 @@ using NOMAD
 function rosenbrock(x)
     res = 0.
     for i in 1:length(x) - 1
-		res += 100 * (x[i+1] - x[i]^2)^2 + (1 - x[i])^2
-	end
-	res
+    	res += 100 * (x[i+1] - x[i]^2)^2 + (1 - x[i])^2
+    end
+    res
 end
 ev = Evaluator(rosenbrock, [], 5)
 opt = Opt(ev, UPPER_BOUND = 10*ones(5), LOWER_BOUND = -10*ones(5), 
-		  X0 = zeros(5), DISPLAY_DEGREE = 0)
+          X0 = zeros(5), DISPLAY_DEGREE = 0)
 optimize(opt)
 ```
 The `Evaluator` takes an objective function `rosenbrock`, an array of
