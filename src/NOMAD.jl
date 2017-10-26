@@ -1,7 +1,6 @@
 #TODO: 
-# 1. implementation of constraints is a hack! eval_g called multiple times.
-# 2. return correct status
-# 3. is it possible to resume? 
+# 1. return correct status
+# 2. is it possible to resume? 
 
 
 module NOMAD
@@ -27,17 +26,35 @@ cxx"""
 import MathProgBase.SolverInterface
 import MathProgBase.SolverInterface.optimize!
 
-function createcbfunc(id, func, ndims, vectorin = true)
+function getfuncsigs(funcs, ndims, vectorin = true, resbyref = false)
     args = [Symbol(:x, i) for i in 1:ndims]
+    argex = vectorin ? :([$(args...)]) : :($(args...))
+    if resbyref
+        argex = typeof(argex) <: Tuple ? (argex..., :res) : (argex, :res)
+    end
+    if typeof(argex) <: Tuple
+        [:($f($(argex...))) for f in funcs]
+    else
+        [:($f($argex)) for f in funcs]
+    end
+end
+
+function createcbfunc(id, funcs, ndims, vectorin = true, resbyref = false)
+    funcsigs = getfuncsigs(funcs, ndims, vectorin, resbyref)
+    if resbyref
+        funccalls = funcsigs
+    else
+        mdims = length(funcs)
+        funccalls = [:(unsafe_store!(res, $(funcsigs[i]), $i)) for i in 1:mdims]
+    end
     cbfuncex = quote
-        function $(Symbol(:evalfunc_, id))($([Symbol(:_x, i) for i in 1:ndims]...))
+        function $(Symbol(:evalfunc_, id))($([Symbol(:_x, i) 
+                                              for i in 1:ndims]...), _res)
             $([:($(Symbol(:x, i)) = unsafe_load($(Symbol(:_x, i))))
                for i in 1:ndims]...)
-            if $vectorin
-                Float64($func([$(args...)]))
-            else
-                Float64($func($(args...)))
-            end
+            res = unsafe_load(_res)
+            $(funccalls...)
+            nothing
         end
     end
     cbfunc = eval(cbfuncex)
@@ -45,9 +62,10 @@ end
 
 struct Evaluator
     ndims::Int
+    mdims::Int
     cppclassname::String
     callbackfunction::Function
-    callbackconstraints::Array{Tuple{Symbol, Function}, 1}
+    constrainttypes::Array{Symbol, 1}
 end
 mutable struct CxxID
     ev::Int
@@ -55,21 +73,27 @@ mutable struct CxxID
 end
 const CXXID = CxxID(0, 0)
 function Evaluator(func, constraints, ndims; printcxx = false, vectorin = true)
+    mdims = 1 + length(constraints)
+    cbfuncs = Function[func]
+    constrtypes = Symbol[]
+    for constr in constraints
+        if typeof(constr) <: Function
+            push!(cbfuncs, constr)
+            push!(constrtypes, :EB)
+        else
+            push!(cbfuncs, constr[2])
+            push!(constrtypes, constr[1])
+        end
+    end
+    Evaluator(cbfuncs, constrtypes, ndims, mdims, 
+              printcxx = printcxx, vectorin = vectorin)
+end
+function Evaluator(cbfuncs, constrainttypes, ndims, mdims; 
+                   printcxx = false, vectorin = true, resbyref = false)
     CXXID.ev += 1
     cppclassname = "NOMAD_Evaluator_$(CXXID.ev)"
-    objfunc = createcbfunc(CXXID.ev, func, ndims, vectorin)
+    cbfunc = createcbfunc(CXXID.ev, cbfuncs, ndims, vectorin, resbyref)
     argstring = join(["x[$i].value()" for i in 0:ndims-1], ",")
-    constrfuncs = Tuple{Symbol, Function}[]
-    constrstring = ""
-    for (i, constr) in enumerate(constraints)
-        if typeof(constr) <: Function
-            constr = (:EB, constr)
-        end
-        push!(constrfuncs, (constr[1], 
-                            createcbfunc("$(CXXID.ev)_c$i", constr[2], ndims,
-                                         vectorin)))
-        constrstring *= "\n    x.set_bb_output  ( $i , \$($(constrfuncs[i][2]))($argstring));"
-    end
     cxxstring = """
         class $cppclassname : public NOMAD::Evaluator {
             public:
@@ -79,14 +103,16 @@ function Evaluator(func, constraints, ndims; printcxx = false, vectorin = true)
                       const NOMAD::Double & h_max      ,
                       bool                & count_eval  ) const
             {
-            x.set_bb_output  ( 0 , \$($(objfunc))($argstring)); $constrstring;
+            double *res = new double [$mdims];
+            \$($(cbfunc))($argstring, res);
+            for (int i = 0; i < $mdims; i++) x.set_bb_output  ( i, res[i]); 
             count_eval = true; 
             return true;
             }        
         };"""
     if printcxx; println(cxxstring); end
     eval(Cxx.process_cxx_string(cxxstring))
-    Evaluator(ndims, cppclassname, objfunc, constrfuncs)
+    Evaluator(ndims, mdims, cppclassname, cbfunc, constrainttypes)
 end
 export Evaluator
 
@@ -98,9 +124,8 @@ function Opt(ev; printcxx = false, kargs...)
     paramstring = parameterstring(ev.ndims, kargs)
     CXXID.main += 1
     funcname = Symbol(:main_, CXXID.main)
-    bboutdim = length(ev.callbackconstraints) + 1
     bboutdefstring = "bbot[0] = NOMAD::OBJ;"
-    for (i, (typ, f)) in enumerate(ev.callbackconstraints)
+    for (i, typ) in enumerate(ev.constrainttypes)
         bboutdefstring *= "\n        bbot[$i] = NOMAD::$typ;"
     end
     cxxstring = """int $funcname(double* bf_x, double* bf_f, 
@@ -110,7 +135,7 @@ function Opt(ev; printcxx = false, kargs...)
         try {
             NOMAD::Parameters p (out); 
             p.set_DIMENSION ($(ev.ndims));
-            vector<NOMAD::bb_output_type> bbot ($bboutdim);
+            vector<NOMAD::bb_output_type> bbot ($(ev.mdims));
             $bboutdefstring;
             p.set_BB_OUTPUT_TYPE( bbot ); $paramstring; 
             p.check();
@@ -213,16 +238,30 @@ function MathProgBase.loadproblem!(m::NOMADMathProgModel, numVar, numConstr,
                                    l, u, lb, ub, sense,
                                    d::SolverInterface.AbstractNLPEvaluator)
     SolverInterface.initialize(d, Symbol[])
-    f(x) = sense == :Max ? -SolverInterface.eval_f(d, x) :
-                            SolverInterface.eval_f(d, x)
-    constraints = []
-    if numConstr > 0
-        for i in 1:numConstr
-            if !isinf(lb[i]); push!(constraints, getboundfunc(lb[i], i, 1, d, numVar)); end
-            if !isinf(ub[i]); push!(constraints, getboundfunc(ub[i], i, -1, d, numVar)); end
+    mdims = 1
+    for i in 1:numConstr
+        if !isinf(lb[i]); mdims += 1; end
+        if !isinf(ub[i]); mdims += 1; end
+    end
+    function cbfunc(x, res)
+        obj = sense == :Max ? -SolverInterface.eval_f(d, x) :
+                                    SolverInterface.eval_f(d, x)
+        unsafe_store!(res, obj, 1)
+        if numConstr > 0
+            constrval = Array{Float64}(numConstr)
+            SolverInterface.eval_g(d, constrval, x)
+            k = 1
+            for i in 1:numConstr
+                if !isinf(lb[i])
+                    unsafe_store!(res, lb[i] - constrval[i], k += 1)
+                end
+                if !isinf(ub[i])
+                    unsafe_store!(res, constrval[i] - ub[i], k += 1)
+                end
+            end
         end
     end
-    m.ev = Evaluator(f, constraints, numVar)
+    m.ev = Evaluator([cbfunc], fill(:EB, mdims - 1), numVar, mdims, resbyref = true)
     m.params = [m.params; (:UPPER_BOUND, replaceinf(u)); (:LOWER_BOUND, replaceinf(l))]
 end
 function SolverInterface.setwarmstart!(m::NOMADMathProgModel,x)
