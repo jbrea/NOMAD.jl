@@ -79,7 +79,7 @@ function Evaluator(func, constraints, ndims; printcxx = false, vectorin = true)
     for constr in constraints
         if typeof(constr) <: Function
             push!(cbfuncs, constr)
-            push!(constrtypes, :EB)
+            push!(constrtypes, :PB)
         else
             push!(cbfuncs, constr[2])
             push!(constrtypes, constr[1])
