@@ -1,7 +1,5 @@
 #TODO: 
-# 1. return correct status
-# 2. is it possible to resume? 
-
+# 1. is it possible to resume? 
 
 module NOMAD
 using Cxx, MathProgBase
@@ -129,7 +127,7 @@ function Opt(ev; printcxx = false, kargs...)
         bboutdefstring *= "\n        bbot[$i] = NOMAD::$typ;"
     end
     cxxstring = """int $funcname(double* bf_x, double* bf_f, 
-                                 NOMAD::Stats *stats) {
+                                 NOMAD::Stats *stats, NOMAD::stop_type *status) {
         NOMAD::Display out ( std::cout );
         out.precision ( NOMAD::DISPLAY_PRECISION_STD );
         try {
@@ -141,7 +139,7 @@ function Opt(ev; printcxx = false, kargs...)
             p.check();
             $(ev.cppclassname) ev (p);
             NOMAD::Mads mads (p, &ev);
-            mads.run();
+            *status = mads.run();
 
             const NOMAD::Eval_Point* bf = mads.get_best_feasible();
             bf_f[0] = bf->get_f().value();
@@ -160,19 +158,36 @@ function Opt(ev; printcxx = false, kargs...)
     """
     if printcxx; println(cxxstring); end
     eval(Cxx.process_cxx_string(cxxstring))
-    cppfunc(bf_x, bf_f, stats) = @cxx $funcname(pointer(bf_x), 
-                                                pointer(bf_f),
-                                                stats)
+    cppfunc(bf_x, bf_f, stats, status) = @cxx $funcname(pointer(bf_x), 
+                                                        pointer(bf_f),
+                                                        stats,
+                                                        status)
     Opt(ev, cppfunc)
 end
 export Opt
+
+# see defines.cpp
+const STOPREASONS = [:ERROR, :UNKNOWN_STOP_REASON, :CTRL_C, :USER_STOPPED,
+                   :MESH_PREC_REACHED, :X0_FAIL, :P1_FAIL, :DELTA_M_MIN_REACHED,
+                   :DELTA_P_MIN_REACHED, :L_MAX_REACHED, :L_MIN_REACHED,
+                   :L_LIMITS_REACHED, :XL_LIMITS_REACHED, :GL_LIMITS_REACHED,
+                   :MAX_TIME_REACHED, :MAX_BB_EVAL_REACHED,
+                   :MAX_BLOCK_EVAL_REACHED, :MAX_SGTE_EVAL_REACHED,
+                   :MAX_EVAL_REACHED, :MAX_SIM_BB_EVAL_REACHED,
+                   :MAX_ITER_REACHED, :MAX_CONS_FAILED_ITER, :FEAS_REACHED,
+                   :F_TARGET_REACHED, :STAT_SUM_TARGET_REACHED,
+                   :L_CURVE_TARGET_REACHED, :MULTI_MAX_BB_REACHED,
+                   :MULTI_NB_MADS_RUNS_REACHED, :MULTI_STAGNATION,
+                   :MULTI_NO_PARETO_PTS, :MAX_CACHE_MEMORY_REACHED] 
 
 function optimize(opt)
     bf_x = zeros(opt.evaluator.ndims)
     bf_f = [0.]
     stats = icxx"new NOMAD::Stats();"
-    opt.cppfunc(bf_x, bf_f, stats)
-    bf_x, bf_f[1], icxx"$stats->get_bb_eval();"
+    status = icxx"new NOMAD::stop_type();"
+    opt.cppfunc(bf_x, bf_f, stats, status)
+    stopreason = STOPREASONS[unsafe_load(status).val]
+    bf_x, bf_f[1], icxx"$stats->get_bb_eval();", stopreason
 end
 export optimize
 
@@ -271,15 +286,16 @@ end
 function SolverInterface.optimize!(m::NOMADMathProgModel)
     isa(m.ev, Evaluator) || error("Must load problem before solving")
     m.opt = Opt(m.ev; m.params...)
-    m.x, m.obj, nbbcalls = optimize(m.opt)
+    m.x, m.obj, nbbcalls, m.status = optimize(m.opt)
 end
 
 function SolverInterface.status(m::NOMADMathProgModel)
-    if m.status == :SUCCESS || m.status == :FTOL_REACHED || m.status == :XTOL_REACHED
+    if m.status in (:MESH_PREC_REACHED, :FEAS_REACHED)
         return :Optimal
-    elseif m.status == :ROUNDOFF_LIMITED
-        return :Suboptimal
-    elseif m.status in (:STOPVAL_REACHED,:MAXEVAL_REACHED,:MAXTIME_REACHED)
+    elseif m.status in (:CTRL_C, :USER_STOPPED, :MAX_TIME_REACHED,
+                        :MAX_BB_EVAL_REACHED, :MAX_BLOCK_EVAL_REACHED,
+                        :MAX_SGTE_EVAL_REACHED, :MAX_EVAL_REACHED,
+                        :MAX_SIM_BB_EVAL_REACHED, :MAX_ITER_REACHED)
         return :UserLimit
     else
         error("Unknown status $(m.status)")
