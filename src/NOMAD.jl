@@ -114,6 +114,28 @@ function Evaluator(cbfuncs, constrainttypes, ndims, mdims;
 end
 export Evaluator
 
+function preprocessarg(ndims, key, arg)
+    if key == :UPPER_BOUND || key == :LOWER_BOUND || key == :X0
+        s = "\n        NOMAD::Point point_$key ( $ndims );"
+        for i in 0:ndims - 1
+            if !isinf(arg[i+1])
+                s *= "\n        point_$key[$i] = $(arg[i+1]);"
+            end
+        end
+        s *= "\n        p.set_$key( point_$key );"
+        s
+    else
+        "\n        p.set_$key( $arg );"
+    end
+end
+function parameterstring(ndims, kargs)
+    s = ""
+    for (key, arg) in kargs
+        s *= preprocessarg(ndims, key, arg)
+    end
+    s
+end
+
 struct Opt
     evaluator::Evaluator
     cppfunc::Function
@@ -191,26 +213,6 @@ function optimize(opt)
 end
 export optimize
 
-function preprocessarg(ndims, key, arg)
-    if key == :UPPER_BOUND || key == :LOWER_BOUND || key == :X0
-        s = "\n        NOMAD::Point point_$key ( $ndims );"
-        for i in 0:ndims - 1
-            s *= "\n        point_$key[$i] = $(arg[i+1]);"
-        end
-        s *= "\n        p.set_$key( point_$key );"
-        s
-    else
-        "\n        p.set_$key( $arg );"
-    end
-end
-function parameterstring(ndims, kargs)
-    s = ""
-    for (key, arg) in kargs
-        s *= preprocessarg(ndims, key, arg)
-    end
-    s
-end
-
 function help(key = "")
     bindir = joinpath(nomaddir, "bin", "nomad")
     s = "This help message is obtained by calling `nomad --help` (in batch mode).\nNot all features are available in julia.\nPlease open an issue on github, if something doesn't work as expected.\n\n"
@@ -221,12 +223,15 @@ end
 
 struct NOMADSolver <: SolverInterface.AbstractMathProgSolver
     params::Array{Tuple{Symbol, Any}, 1}
+    constrainttype::Symbol
 end
-NOMADSolver() = NOMADSolver([(:DISPLAY_DEGREE, 0)])
+function NOMADSolver(; DISPLAY_DEGREE = 0, constrainttype = :PB, kargs...)
+    NOMADSolver([(:DISPLAY_DEGREE, DISPLAY_DEGREE); kargs], constrainttype)
+end
 
 function SolverInterface.NonlinearModel(s::NOMADSolver)
     NOMADMathProgModel(nothing, nothing, :Min, Float64[], 
-                       s.params, 0., :SUCCESS)
+                       s.params, Inf64, :NOT_STARTED, s.constrainttype)
 end
 
 mutable struct NOMADMathProgModel <: SolverInterface.AbstractNonlinearModel
@@ -237,9 +242,8 @@ mutable struct NOMADMathProgModel <: SolverInterface.AbstractNonlinearModel
     params::Array{Tuple{Symbol, Any}, 1}
     obj::Float64
     status::Symbol
+    constrainttype::Symbol
 end
-
-replaceinf(b) = map(x -> isinf(x) ? "$(sign(x) == 1 ? "" : "-")INFINITY" : x, b)
 
 function getboundfunc(b, i, sign, d, numVar)
     constrval = Array{Float64}(numVar)
@@ -276,8 +280,9 @@ function MathProgBase.loadproblem!(m::NOMADMathProgModel, numVar, numConstr,
             end
         end
     end
-    m.ev = Evaluator([cbfunc], fill(:EB, mdims - 1), numVar, mdims, resbyref = true)
-    m.params = [m.params; (:UPPER_BOUND, replaceinf(u)); (:LOWER_BOUND, replaceinf(l))]
+    m.ev = Evaluator([cbfunc], fill(m.constrainttype, mdims - 1), 
+                     numVar, mdims, resbyref = true)
+    m.params = [m.params; (:UPPER_BOUND, u); (:LOWER_BOUND, l)]
 end
 function SolverInterface.setwarmstart!(m::NOMADMathProgModel,x)
     push!(m.params, (:X0, copy(float(x))))
