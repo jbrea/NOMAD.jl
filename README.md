@@ -28,6 +28,10 @@ opt = Opt(ev, UPPER_BOUND = 10*ones(5), LOWER_BOUND = -10*ones(5),
 		  X0 = zeros(5), DISPLAY_DEGREE = 0)
 optimize(opt)
 ```
+The `Evaluator` takes an objective function `rosenbrock`, an array of
+constraints (the empty array `[]`), and the dimensionality of the problem `5`.
+`Opt` takes an evaluator `ev` and any number of keyword arguments that are
+allowed in NOMAD (c.f `NOMAD.help()`)
 
 ```julia
 using NOMAD
@@ -36,6 +40,11 @@ ev = Evaluator((x, y) -> - x^2 + (y - 1)^2, [(:EB, (x, y) -> x - y)], 2, vectori
 opt = Opt(ev, UPPER_BOUND = [5, 6], LOWER_BOUND = [-2, -6], X0 = [1, 2])
 optimize(opt)
 ```
+The array of constraints can contain functions (for which the default type
+`:PB` is assumed) or tuples of the form (type of constraint, function). The
+keyword argument `vectorin = false` (default `true`) is set to indicate that the
+functions provided in this examples do not take a vector as input but 2 scalar
+arguments.
 
 ```julia
 using NOMAD
@@ -53,7 +62,7 @@ other optimization packages from modeling packages like
 
 ```julia
 using JuMP, NOMAD
-m = Model(solver = NOMAD.NOMADSolver())
+m = Model(solver = NOMAD.NOMADSolver(DISPLAY_DEGREE = 2, constrainttype = :EB))
 a1 = 2
 b1 = 0
 a2 = -1
