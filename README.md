@@ -49,7 +49,8 @@ arguments.
 ```julia
 using NOMAD
 ev = Evaluator(x -> x[5], [(:PB, x -> (norm(x-1)^2 - 25)), (:EB, x -> 25 - norm(x + 1)^2)], 5)
-opt = Opt(ev, UPPER_BOUND = [5, 6, 7, Inf64, Inf64], LOWER_BOUND = -6*ones(5), X0 = zeros(5), MAX_BB_EVAL = 100, SEED = 11)
+opt = Opt(ev, UPPER_BOUND = [5, 6, 7, Inf64, Inf64], LOWER_BOUND = -6*ones(5), 
+          X0 = zeros(5), MAX_BB_EVAL = 100, SEED = 11)
 optimize(opt)
 ```
 
