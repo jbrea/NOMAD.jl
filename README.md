@@ -11,7 +11,7 @@ Currently the installation is only tested on Linux. Please adapt
 [deps/build.jl](deps/build.jl) for other platforms.
 
 Within Julia, you can install the NOMAD.jl package with the package manager: 
-`Pkg.clone("https://github.com/jbrea/NOMAD.jl")`
+`Pkg.add("NOMAD")`
 
 ## Basic Usage
 ```julia
