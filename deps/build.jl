@@ -28,7 +28,7 @@ provides(BuildProcess,
 			`mv src/nomad.$nomadversion src/nomad`
 			@build_steps begin
 				ChangeDirectory(installdir)
-				`sh install.sh`
+				`bash install.sh`
 			end
 	   	end), [libnomad, libsgtelib], os = :Linux, installed_libpath=libdir)
 
