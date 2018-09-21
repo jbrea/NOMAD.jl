@@ -1,9 +1,10 @@
-# The NOMAD module for Julia
+# The NOMAD module for Julia v0.6
 This module provides a [Julia-language](http://julialang.org/) interface to the 
 free/open-source [NOMAD](https://www.gerad.ca/nomad/Project/Home.html) library 
 for nonlinear optimization of black-box functions. Currently only a limited set
 of features of [NOMAD](https://www.gerad.ca/nomad/Project/Home.html) is
-available through this interface.
+available through this interface. **Currently it works only for julia v0.6;
+if you wish to update it to later versions of Julia, please consider opening a PR.**
 
 ## Installation
 
